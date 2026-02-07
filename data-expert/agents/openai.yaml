@@ -1,0 +1,4 @@
+interface:
+  display_name: "Data Expert"
+  short_description: "Refactor and optimize SQL and DataFrame pipelines"
+  default_prompt: "Use $data-expert to refactor this transformation for correctness, clarity, and performance without changing behavior."
