@@ -1,0 +1,4 @@
+interface:
+  display_name: "PySpark Style Guide"
+  short_description: "Write readable PySpark code"
+  default_prompt: "Use $pyspark-style-guide to rewrite or review this PySpark code with a readability-first style guide without changing behavior."

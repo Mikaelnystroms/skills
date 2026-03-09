@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Static checker for common data-code anti-patterns.
+"""Static checker for common PySpark style issues.
 
-This script is intentionally lightweight and heuristic-based. It helps catch
-high-signal issues quickly during refactors and reviews.
+This checker is intentionally lightweight and heuristic-based. It highlights
+patterns worth reviewing against the bundled style guide.
 """
 
 from __future__ import annotations
@@ -15,8 +15,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
 
-ALL_ENGINES = {"sql", "pyspark", "pandas", "polars"}
-
 
 @dataclass(frozen=True)
 class Rule:
@@ -24,7 +22,6 @@ class Rule:
     severity: str
     message: str
     pattern: str
-    engines: tuple[str, ...]
     flags: int = 0
 
 
@@ -40,99 +37,37 @@ class Finding:
 
 RULES = (
     Rule(
-        "DE_SQL_SELECT_STAR",
+        "PSG_DRIVER_ACTION",
         "warn",
-        "Avoid SELECT * unless full-column projection is required.",
-        r"\bSELECT\s+\*",
-        ("sql",),
-        re.IGNORECASE,
+        "Review driver-side actions in transform code.",
+        r"\.(collect|head|take|first|show)\s*\(",
     ),
     Rule(
-        "DE_SQL_TRAILING_SEMICOLON",
+        "PSG_UDF",
         "warn",
-        "Avoid trailing semicolons in Spark SQL/HiveQL style.",
-        r";\s*$",
-        ("sql",),
-        re.MULTILINE,
-    ),
-    Rule(
-        "DE_SQL_RIGHT_JOIN",
-        "warn",
-        "Avoid RIGHT JOIN unless there is a clear reason.",
-        r"\bRIGHT\s+JOIN\b",
-        ("sql",),
-        re.IGNORECASE,
-    ),
-    Rule(
-        "DE_PYSPARK_DRIVER_ACTION",
-        "warn",
-        "Avoid driver actions (collect/head/take) in core transforms.",
-        r"\.(collect|head|take)\s*\(",
-        ("pyspark",),
-    ),
-    Rule(
-        "DE_PYSPARK_UDF",
-        "warn",
-        "Prefer built-in expressions over Python UDFs.",
+        "Prefer built-in expressions over Python UDFs when possible.",
         r"(@udf\b|\b(?:F\.)?udf\s*\()",
-        ("pyspark",),
         re.IGNORECASE,
     ),
     Rule(
-        "DE_PYSPARK_BACKSLASH_CONTINUATION",
+        "PSG_BACKSLASH_CONTINUATION",
         "warn",
-        "Avoid backslash-based line continuation; prefer parentheses.",
+        "Prefer parentheses over backslash line continuation.",
         r"\\\s*$",
-        ("pyspark",),
         re.MULTILINE,
     ),
     Rule(
-        "DE_PANDAS_INPLACE",
+        "PSG_OTHERWISE_FALLBACK",
         "warn",
-        "Avoid inplace=True to keep dataflow explicit.",
-        r"\binplace\s*=\s*True\b",
-        ("pandas",),
-    ),
-    Rule(
-        "DE_PANDAS_CHAINED_INDEXING",
-        "warn",
-        "Avoid chained indexing; use .loc for deterministic writes.",
-        r"\[[^\]\n]+\]\[[^\]\n]+\]",
-        ("pandas",),
-    ),
-    Rule(
-        "DE_PANDAS_APPLY",
-        "warn",
-        "Review .apply usage; prefer vectorized operations when possible.",
-        r"\.apply\s*\(",
-        ("pandas",),
-    ),
-    Rule(
-        "DE_POLARS_APPLY",
-        "warn",
-        "Prefer expression API over row-wise .apply/map_rows.",
-        r"\.(apply|map_rows)\s*\(",
-        ("polars",),
-    ),
-    Rule(
-        "DE_POLARS_EAGER_READ",
-        "warn",
-        "For large workloads, prefer scan_* over read_* when feasible.",
-        r"\bpl\.read_(csv|parquet|json)\s*\(",
-        ("polars",),
+        "Review broad otherwise(...) fallbacks to ensure unexpected values stay visible.",
+        r"\.otherwise\s*\(",
     ),
 )
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Check data code for common anti-patterns.")
+    parser = argparse.ArgumentParser(description="Check PySpark code for common style issues.")
     parser.add_argument("--path", help="Path to file to check. If omitted, read from stdin.")
-    parser.add_argument(
-        "--engine",
-        default="auto",
-        choices=["auto", "all", "sql", "pyspark", "pandas", "polars"],
-        help="Engine to check.",
-    )
     parser.add_argument(
         "--format",
         default="text",
@@ -153,35 +88,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def detect_engines(text: str, path: str | None) -> set[str]:
-    detected: set[str] = set()
-    suffix = Path(path).suffix.lower() if path else ""
-    is_python = suffix == ".py" or bool(
-        re.search(r"^\s*(from|import|def|class)\b", text, flags=re.MULTILINE)
-    )
-
-    if suffix in {".sql", ".hql"}:
-        return {"sql"}
-
-    if re.search(r"\bfrom\s+pyspark\.sql\b|\bSparkSession\b|\bF\.|\bwithColumn\b|\bgroupBy\b", text):
-        detected.add("pyspark")
-    if re.search(r"\bimport\s+pandas\b|\bimport\s+pandas\s+as\s+pd\b|\bpd\.|\.groupby\s*\(|\.merge\s*\(", text):
-        detected.add("pandas")
-    if re.search(r"\bimport\s+polars\b|\bimport\s+polars\s+as\s+pl\b|\bpl\.|\.with_columns\s*\(|\.group_by\s*\(", text):
-        detected.add("polars")
-    # Avoid classifying normal Python files as SQL due to SQL-like text in comments/strings.
-    if not is_python and re.search(r"\bSELECT\b.*\bFROM\b", text, re.IGNORECASE | re.DOTALL):
-        detected.add("sql")
-    elif re.search(r"\bspark\.sql\s*\(", text):
-        detected.add("sql")
-
-    if not detected:
-        if is_python:
-            return set()
-        return set(ALL_ENGINES)
-    return detected
-
-
 def index_to_line_col(text: str, index: int) -> tuple[int, int]:
     line = text.count("\n", 0, index) + 1
     last_nl = text.rfind("\n", 0, index)
@@ -196,11 +102,9 @@ def line_at(text: str, line_number: int) -> str:
     return ""
 
 
-def run_regex_rules(text: str, active_engines: set[str]) -> list[Finding]:
+def run_regex_rules(text: str) -> list[Finding]:
     findings: list[Finding] = []
     for rule in RULES:
-        if not set(rule.engines).intersection(active_engines):
-            continue
         for match in re.finditer(rule.pattern, text, flags=rule.flags):
             line, column = index_to_line_col(text, match.start())
             findings.append(
@@ -216,10 +120,7 @@ def run_regex_rules(text: str, active_engines: set[str]) -> list[Finding]:
     return findings
 
 
-def run_custom_pyspark_checks(text: str, active_engines: set[str]) -> list[Finding]:
-    if "pyspark" not in active_engines:
-        return []
-
+def run_custom_checks(text: str) -> list[Finding]:
     findings: list[Finding] = []
     for match in re.finditer(r"\.join\s*\((.*?)\)", text, flags=re.DOTALL):
         args = match.group(1)
@@ -228,9 +129,26 @@ def run_custom_pyspark_checks(text: str, active_engines: set[str]) -> list[Findi
         line, column = index_to_line_col(text, match.start())
         findings.append(
             Finding(
-                rule_id="DE_PYSPARK_JOIN_WITHOUT_HOW",
+                rule_id="PSG_JOIN_WITHOUT_HOW",
                 severity="warn",
                 message="Specify how= explicitly in DataFrame.join(...).",
+                line=line,
+                column=column,
+                snippet=line_at(text, line),
+            )
+        )
+
+    for match in re.finditer(r"\bWindow\.(partitionBy|orderBy)\s*\(", text):
+        start = match.start()
+        snippet = text[start : start + 240]
+        if "rowsBetween" in snippet or "rangeBetween" in snippet:
+            continue
+        line, column = index_to_line_col(text, start)
+        findings.append(
+            Finding(
+                rule_id="PSG_WINDOW_FRAME_REVIEW",
+                severity="warn",
+                message="Review window frame semantics and make the frame explicit when it matters.",
                 line=line,
                 column=column,
                 snippet=line_at(text, line),
@@ -261,14 +179,6 @@ def read_input(path: str | None) -> tuple[str, str]:
     return text, "<stdin>"
 
 
-def resolve_engines(engine: str, text: str, path: str | None) -> set[str]:
-    if engine == "all":
-        return set(ALL_ENGINES)
-    if engine == "auto":
-        return detect_engines(text, path)
-    return {engine}
-
-
 def emit_text(findings: list[Finding], display_path: str, max_findings: int) -> None:
     if not findings:
         print(f"{display_path}: No findings.")
@@ -283,12 +193,9 @@ def emit_text(findings: list[Finding], display_path: str, max_findings: int) -> 
         print(f"{display_path}: ... {omitted} additional findings omitted.")
 
 
-def emit_json(
-    findings: list[Finding], display_path: str, engines: set[str], max_findings: int
-) -> None:
+def emit_json(findings: list[Finding], display_path: str, max_findings: int) -> None:
     payload = {
         "path": display_path,
-        "engines": sorted(engines),
         "findings": [asdict(item) for item in findings[:max_findings]],
         "truncated": max(0, len(findings) - max_findings),
     }
@@ -302,13 +209,10 @@ def main() -> int:
         print(f"{display_path}: Empty input.")
         return 0
 
-    engines = resolve_engines(args.engine, text, args.path)
-    findings = dedupe_findings(
-        run_regex_rules(text, engines) + run_custom_pyspark_checks(text, engines)
-    )
+    findings = dedupe_findings(run_regex_rules(text) + run_custom_checks(text))
 
     if args.format == "json":
-        emit_json(findings, display_path, engines, args.max_findings)
+        emit_json(findings, display_path, args.max_findings)
     else:
         emit_text(findings, display_path, args.max_findings)
 
